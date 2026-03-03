@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Pico 物理快门相机</title>
+    <style>
+        body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; display: flex; flex-direction: column; align-items: center; }
+        .video-wrapper { position: relative; width: 100vw; height: 75vw; background: #111; display: flex; justify-content: center; align-items: center; }
+        video { width: 100%; height: auto; object-fit: cover; }
+        canvas { display: none; } /* 仅用于后台拍照 */
+        
+        .ui-layer { padding: 20px; text-align: center; z-index: 10; }
+        #status { font-size: 14px; color: #0f0; margin-bottom: 15px; min-height: 1.2em; }
+        
+        button { 
+            padding: 15px 30px; font-size: 16px; font-weight: bold; border: none; 
+            border-radius: 50px; background: #28a745; color: white; cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3); margin: 5px;
+        }
+        button.connect-btn { background: #ffc107; color: #000; }
+        button:active { transform: scale(0.95); opacity: 0.9; }
+    </style>
+</head>
+<body>
+
+    <div class="video-wrapper">
+        <video id="v" autoplay playsinline></video>
+    </div>
+
+    <div class="ui-layer">
+        <div id="status">等待连接 Pico...</div>
+        <button class="connect-btn" onclick="initSerial()">🔌 第一步：授权物理快门</button>
+        <button onclick="startCamera()">📷 第二步：启动相机</button>
+    </div>
+
+    <canvas id="c"></canvas>
+
+    <script>
+        const v = document.getElementById('v');
+        const c = document.getElementById('c');
+        const status = document.getElementById('status');
+
+        // 1. 启动摄像头
+        async function startCamera() {
+            try {
+                // 自动选择最后一个摄像头（通常是外接的 Pico 或手机后置）
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(d => d.kind === 'videoinput');
+                const deviceId = videoDevices.length > 0 ? videoDevices[videoDevices.length - 1].deviceId : undefined;
+
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { deviceId: deviceId, width: { ideal: 640 }, height: { ideal: 480 } }
+                });
+                v.srcObject = stream;
+                status.innerText = "相机已就绪，请连接串口";
+            } catch (err) {
+                status.innerText = "相机启动失败: " + err.message;
+            }
+        }
+
+        // 2. 连接 Pico 串口监听物理开关
+        async function initSerial() {
+            if (!("serial" in navigator)) {
+                alert("当前浏览器不支持 Web Serial。请在电脑端 Chrome 或手机端开启了相关实验特性的 Chrome 中打开。");
+                return;
+            }
+
+            try {
+                const port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+                status.innerText = "✅ 链路已建立！拨动开关即可拍照";
+                
+                // 设置读取流
+                const textDecoder = new TextDecoderStream();
+                const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
+                const reader = textDecoder.readable.getReader();
+
+                // 持续监听
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    if (value && value.includes("SNAPSHOT")) {
+                        console.log("检测到物理按键信号！");
+                        savePhoto();
+                    }
+                }
+            } catch (err) {
+                status.innerText = "串口连接出错: " + err;
+            }
+        }
+
+        // 3. 执行拍照保存
+        function savePhoto() {
+            const ctx = c.getContext('2d');
+            c.width = v.videoWidth;
+            c.height = v.videoHeight;
+            
+            // 抓取当前视频帧
+            ctx.drawImage(v, 0, 0, c.width, c.height);
+            
+            // 自动下载
+            const link = document.createElement('a');
+            link.download = `Pico_Shot_${new Date().getTime()}.jpg`;
+            link.href = c.toDataURL('image/jpeg', 0.9);
+            link.click();
+
+            // 视觉反馈：闪白一下
+            v.style.filter = "brightness(2)";
+            setTimeout(() => { v.style.filter = "none"; }, 100);
+            
+            status.innerText = "📸 已自动保存照片！";
+            setTimeout(() => { status.innerText = "✅ 链路已建立！拨动开关即可拍照"; }, 2000);
+        }
+    </script>
+</body>
+</html>
