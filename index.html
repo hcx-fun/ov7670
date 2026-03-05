@@ -3,23 +3,83 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Pico 物理快门相机</title>
+    <title>Pico 物理快门相机 Pro</title>
     <style>
-        body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; display: flex; flex-direction: column; align-items: center; }
-        .video-wrapper { position: relative; width: 100vw; height: 75vw; background: #111; display: flex; justify-content: center; align-items: center; }
-        video { width: 100%; height: auto; object-fit: cover; }
-        canvas { display: none; } /* 仅用于后台拍照 */
-        
-        .ui-layer { padding: 20px; text-align: center; z-index: 10; }
-        #status { font-size: 14px; color: #0f0; margin-bottom: 15px; min-height: 1.2em; }
-        
-        button { 
-            padding: 15px 30px; font-size: 16px; font-weight: bold; border: none; 
-            border-radius: 50px; background: #28a745; color: white; cursor: pointer;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.3); margin: 5px;
+        body { 
+            margin: 0; 
+            background: #000; 
+            color: #fff; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            min-height: 100vh;
+            overflow-y: auto; /* 允许纵向滚动，防止按钮被遮挡 */
         }
-        button.connect-btn { background: #ffc107; color: #000; }
+
+        .video-wrapper { 
+            position: relative; 
+            width: 100%; 
+            max-height: 65vh; /* 限制视频高度，给下方按钮留出空间 */
+            background: #111; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            overflow: hidden;
+        }
+
+        video { 
+            width: 100%; 
+            height: auto; 
+            max-height: 65vh;
+            object-fit: contain; 
+            transition: filter 0.1s; /* 用于快门闪烁效果 */
+        }
+
+        .ui-layer { 
+            padding: 20px; 
+            text-align: center; 
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        #status { 
+            font-size: 14px; 
+            color: #00ff00; 
+            margin-bottom: 20px; 
+            min-height: 1.5em;
+            background: rgba(0,255,0,0.1);
+            padding: 8px;
+            border-radius: 8px;
+        }
+        
+        .btn-group {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            align-items: center;
+        }
+
+        button { 
+            width: 80%;
+            max-width: 300px;
+            padding: 16px; 
+            font-size: 16px; 
+            font-weight: bold; 
+            border: none; 
+            border-radius: 12px; 
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+            transition: transform 0.1s, opacity 0.1s;
+        }
+
+        .camera-btn { background: #28a745; color: white; }
+        .connect-btn { background: #ffc107; color: #000; }
+        
         button:active { transform: scale(0.95); opacity: 0.9; }
+        button:disabled { background: #555; color: #888; cursor: not-allowed; }
+
+        canvas { display: none; } /* 隐藏拍照用的画布 */
     </style>
 </head>
 <body>
@@ -29,9 +89,12 @@
     </div>
 
     <div class="ui-layer">
-        <div id="status">等待连接 Pico...</div>
-        <button class="connect-btn" onclick="initSerial()">🔌 第一步：授权物理快门</button>
-        <button onclick="startCamera()">📷 第二步：启动相机</button>
+        <div id="status">📸 准备就绪：请先启动相机</div>
+        
+        <div class="btn-group">
+            <button class="camera-btn" onclick="startCamera()">📷 第一步：启动相机</button>
+            <button class="connect-btn" id="serialBtn" onclick="initSerial()" disabled>🔌 第二步：授权物理快门</button>
+        </div>
     </div>
 
     <canvas id="c"></canvas>
@@ -40,77 +103,107 @@
         const v = document.getElementById('v');
         const c = document.getElementById('c');
         const status = document.getElementById('status');
+        const serialBtn = document.getElementById('serialBtn');
+
+        let serialBuffer = ""; // 串口缓冲区，处理碎片化数据
 
         // 1. 启动摄像头
         async function startCamera() {
             try {
-                // 自动选择最后一个摄像头（通常是外接的 Pico 或手机后置）
-                const devices = await navigator.mediaDevices.enumerateDevices();
-                const videoDevices = devices.filter(d => d.kind === 'videoinput');
-                const deviceId = videoDevices.length > 0 ? videoDevices[videoDevices.length - 1].deviceId : undefined;
-
+                status.innerText = "正在请求摄像头权限...";
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { deviceId: deviceId, width: { ideal: 640 }, height: { ideal: 480 } }
+                    video: { 
+                        width: { ideal: 1280 }, 
+                        height: { ideal: 720 },
+                        facingMode: "environment" // 优先后置或外接
+                    }
                 });
                 v.srcObject = stream;
-                status.innerText = "相机已就绪，请连接串口";
+                status.innerText = "✅ 相机已就绪，请授权串口";
+                serialBtn.disabled = false; // 激活第二个按钮
             } catch (err) {
-                status.innerText = "相机启动失败: " + err.message;
+                status.innerText = "❌ 相机启动失败: " + err.message;
+                console.error(err);
             }
         }
 
-        // 2. 连接 Pico 串口监听物理开关
+        // 2. 连接 Pico 串口监听
         async function initSerial() {
             if (!("serial" in navigator)) {
-                alert("当前浏览器不支持 Web Serial。请在电脑端 Chrome 或手机端开启了相关实验特性的 Chrome 中打开。");
+                alert("当前浏览器不支持 Web Serial API，请使用 Chrome 或 Edge。");
                 return;
             }
 
             try {
                 const port = await navigator.serial.requestPort();
                 await port.open({ baudRate: 115200 });
-                status.innerText = "✅ 链路已建立！拨动开关即可拍照";
-                
-                // 设置读取流
+                status.innerText = "🚀 链路已建立！拨动硬件开关即可拍照";
+                serialBtn.innerText = "✅ 串口已连接";
+                serialBtn.disabled = true;
+
                 const textDecoder = new TextDecoderStream();
                 const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
                 const reader = textDecoder.readable.getReader();
 
-                // 持续监听
+                // 持续循环监听
                 while (true) {
                     const { value, done } = await reader.read();
                     if (done) break;
-                    if (value && value.includes("SNAPSHOT")) {
-                        console.log("检测到物理按键信号！");
-                        savePhoto();
+                    if (value) {
+                        serialBuffer += value; 
+                        console.log("收到原始数据:", value);
+
+                        // 核心：检查缓冲区是否包含完整指令
+                        if (serialBuffer.includes("SNAPSHOT")) {
+                            console.log("🔥 触发快门！");
+                            savePhoto();
+                            serialBuffer = ""; // 触发后清空，防止连拍
+                        }
+
+                        // 防止缓冲区异常增长
+                        if (serialBuffer.length > 50) serialBuffer = "";
                     }
                 }
             } catch (err) {
-                status.innerText = "串口连接出错: " + err;
+                status.innerText = "❌ 串口错误: " + err.message;
+                console.error(err);
             }
         }
 
-        // 3. 执行拍照保存
+        // 3. 执行拍照与下载
         function savePhoto() {
             const ctx = c.getContext('2d');
+            
+            // 设置画布尺寸与视频流一致
             c.width = v.videoWidth;
             c.height = v.videoHeight;
             
-            // 抓取当前视频帧
+            // 绘制当前帧
             ctx.drawImage(v, 0, 0, c.width, c.height);
             
-            // 自动下载
-            const link = document.createElement('a');
-            link.download = `Pico_Shot_${new Date().getTime()}.jpg`;
-            link.href = c.toDataURL('image/jpeg', 0.9);
-            link.click();
+            // 生成文件名（带时间戳）
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const fileName = `Pico_Shot_${timestamp}.jpg`;
 
-            // 视觉反馈：闪白一下
-            v.style.filter = "brightness(2)";
-            setTimeout(() => { v.style.filter = "none"; }, 100);
-            
-            status.innerText = "📸 已自动保存照片！";
-            setTimeout(() => { status.innerText = "✅ 链路已建立！拨动开关即可拍照"; }, 2000);
+            // 自动下载
+            try {
+                const link = document.createElement('a');
+                link.download = fileName;
+                link.href = c.toDataURL('image/jpeg', 0.95);
+                link.click();
+                
+                // 视觉反馈：闪白快门效果
+                v.style.filter = "brightness(2.5)";
+                setTimeout(() => { v.style.filter = "none"; }, 100);
+                
+                status.innerText = "📸 照片已保存: " + fileName;
+                setTimeout(() => {
+                    if (serialBtn.disabled) status.innerText = "🚀 链路正常，等待下次拨动...";
+                }, 3000);
+
+            } catch (e) {
+                status.innerText = "❌ 保存失败: " + e.message;
+            }
         }
     </script>
 </body>
